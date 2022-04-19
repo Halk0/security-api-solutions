@@ -23,11 +23,11 @@ class RequestManager:
 
     def __enter__(self):
         try:
-            self.existing_indicators_hash_fd = open(EXISTING_INDICATORS_HASH_FILE_NAME, 'r+')
-            self.existing_indicators_hash = json.load(self.existing_indicators_hash_fd)
+            self.existing_indicators_uuid_fd = open(EXISTING_INDICATORS_HASH_FILE_NAME, 'r+')
+            self.existing_indicators_uuid = json.load(self.existing_indicators_uuid_fd)
         except (FileNotFoundError, json.decoder.JSONDecodeError):
-            self.existing_indicators_hash_fd = open(EXISTING_INDICATORS_HASH_FILE_NAME, 'w')
-            self.existing_indicators_hash = {}
+            self.existing_indicators_uuid_fd = open(EXISTING_INDICATORS_HASH_FILE_NAME, 'w')
+            self.existing_indicators_uuid = {}
         try:
             self.expiration_date_fd = open(EXPIRATION_DATE_FILE_NAME, 'r+')
             self.expiration_date = self.expiration_date_fd.read()
@@ -35,10 +35,11 @@ class RequestManager:
             self.expiration_date_fd = open(EXPIRATION_DATE_FILE_NAME, 'w')
             self.expiration_date = self._get_expiration_date_from_config()
         if self.expiration_date <= datetime.datetime.utcnow().strftime('%Y-%m-%d'):
-            self.existing_indicators_hash = {}
+            self.existing_indicators_uuid = {}
             self.expiration_date = self._get_expiration_date_from_config()
-        self.hash_of_indicators_to_delete = copy.deepcopy(self.existing_indicators_hash)
-        #print(f"hash of indicators to delete {self.hash_of_indicators_to_delete}")
+        self.hash_of_indicators_to_delete = {}
+        self.indicators_to_be_updated_uuid = []
+        # print(f'hash of indicators to delete {self.hash_of_indicators_to_delete}')
         access_token = self._get_access_token(
             config.graph_auth[TENANT],
             config.graph_auth[CLIENT_ID],
@@ -48,11 +49,16 @@ class RequestManager:
         self.success_count = 0
         self.error_count = 0
         self.del_count = 0
+        self.update_count = 0
         self.indicators_to_be_sent = []
         self.indicators_to_be_sent_size = 0
+        self.list_of_indicators_to_update = []
         self.start_time = self.last_batch_done_timestamp = self._get_timestamp()
         if not os.path.exists(LOG_DIRECTORY_NAME):
             os.makedirs(LOG_DIRECTORY_NAME)
+        for uuid in self.existing_indicators_uuid:
+            if uuid not in self.indicators_to_be_updated_uuid:
+                self.indicators_to_be_updated_uuid.append(uuid)
         return self
 
     @staticmethod
@@ -80,19 +86,18 @@ class RequestManager:
             config.graph_auth[CLIENT_ID],
             config.graph_auth[CLIENT_SECRET])
         print(json.dumps(requests.get(
-            GRAPH_TI_INDICATORS_URL,
-            headers={"Authorization": f"Bearer {access_token}"}
-            ).json(), indent=2))
+                    GRAPH_TI_INDICATORS_URL,
+                    headers={"Authorization": f"Bearer {access_token}"}
+                ).json(), indent=2))
 
     @staticmethod
     def _get_request_hash(request):
         return str(hash(frozenset({
-            k: str(v) for k, v in request.items()
-            if k != 'expirationDateTime' and k != 'lastReportedDateTime'
-        }.items())))
+                        k: str(v) for k, v in request.items()
+                        if k != 'expirationDateTime' and k != 'lastReportedDateTime'
+                    }.items())))
 
     def _log_post(self, response):
-        self._clear_screen()
         cur_batch_success_count = cur_batch_error_count = 0
         #print(f"response: {response}")
         if 'error' in response:
@@ -113,34 +118,62 @@ class RequestManager:
                     else:
                         self.success_count += 1
                         cur_batch_success_count += 1
-                        self.existing_indicators_hash[value[INDICATOR_REQUEST_HASH]] = value['id']
+                        self.existing_indicators_uuid[value['externalId']] = value['id']
                         # if not config.verbose_log:
                         #     continue
                         file_name = f"{self._get_datetime_now()}_{value[INDICATOR_REQUEST_HASH]}.json"
                         log_file_name = file_name.replace(':', '')
                     with open(f'{LOG_DIRECTORY_NAME}/{log_file_name}', 'w') as file:
-                        json.dump(value, file)
-            else: 
+                        json.dump(value, file, indent=2)
+            else:
                 file_name = f"{self._get_datetime_now()}.json"
                 log_file_name = file_name.replace(':', '')
                 with open(f'{LOG_DIRECTORY_NAME}/{log_file_name}', 'w') as file:
                     json.dump(response, file)
-
         print('sending security indicators to Microsoft Graph Security\n')
-        print(f'{self.total_indicators} indicators are parsed from misp events. Only those that do not exist in Microsoft Graph Security will be sent.\n')
-        # print(f"current batch indicators sent:  {str(cur_batch_success_count + cur_batch_error_count).rjust(self.RJUST)}")
-        # print(f"current batch response success: {str(cur_batch_success_count).rjust(self.RJUST)}")
-        # print(f"current batch response error:   {str(cur_batch_error_count).rjust(self.RJUST)}\n")
-        #print(f"total indicators sent:          {str(self._get_total_indicators_sent()).rjust(self.RJUST)}")
-        #print(f"total response success:         {str(self.success_count).rjust(self.RJUST)}")
-        #print(f"total response error:           {str(self.error_count).rjust(self.RJUST)}\n")
+        print(
+            f'{self.total_indicators} indicators are parsed from misp events. Only those that do not exist in Microsoft Graph Security will be sent.\n'
+        )
         cur_batch_took = self._get_timestamp() - self.last_batch_done_timestamp
         self.last_batch_done_timestamp = self._get_timestamp()
         print(f'current batch took:   {round(cur_batch_took, 2):{6}} seconds')
-        # avg_speed = self._get_total_indicators_sent() / (self.last_batch_done_timestamp - self.start_time)
-        # print(f'average speed so far: {round(avg_speed, 2):{6}} indicators per second')
-        # time_left = (self.total_indicators - self._get_total_indicators_sent()) / avg_speed
-        # print(f'estimated time left:  {round(time_left, 2):{6}} seconds')
+
+    def _log_update(self, response):
+        cur_batch_success_count = cur_batch_error_count = 0
+        if ('error' in response) or ('innerError' in response):
+            self.error_count += 1
+            cur_batch_error_count += 1
+            file_name = f'{self._get_datetime_now()}_error.json'
+            log_file_name = file_name.replace(':', '')
+            with open(f'{LOG_DIRECTORY_NAME}/{log_file_name}', 'w') as file:
+                json.dump(response['error'], file,  indent=2)
+        else:
+            if len(response['value']) > 0:
+                for value in response['value']:
+                    if ('Error' in value) or ('innerError' in value):
+                        self.error_count += 1
+                        cur_batch_error_count += 1
+                        file_name = f'{self._get_datetime_now()}_error_{value[INDICATOR_REQUEST_HASH]}.json'
+                        log_file_name = file_name.replace(':', '')
+                    else:
+                        self.update_count += 1
+                        cur_batch_success_count += 1
+                        self.existing_indicators_uuid[
+                            value['externalId']
+                        ] = value['id']
+                        file_name = f'{self._get_datetime_now()}_{value[INDICATOR_REQUEST_HASH]}.json'
+                        log_file_name = file_name.replace(':', '')
+                    with open(f'{LOG_DIRECTORY_NAME}/{log_file_name}', 'w') as file:
+                        json.dump(value, file, indent=2)
+        print('sending security indicators to Microsoft Graph Security\n')
+        print(
+            f'{self.total_indicators} indicators are parsed from misp events. Only those that exist in Microsoft Graph Security will be updated.\n'
+        )
+        cur_batch_took = self._get_timestamp() - self.last_batch_done_timestamp
+        self.last_batch_done_timestamp = self._get_timestamp()
+        print(f'current batch took:   {round(cur_batch_took, 2):{6}} seconds')
+
+
 
     @staticmethod
     def _get_datetime_now():
@@ -149,6 +182,7 @@ class RequestManager:
     def __exit__(self, exc_type, exc_val, exc_tb):
         #if config.targetProduct in TARGET_PRODUCT_BULK_SUPPORT:
         self._post_to_graph()
+        self._update_to_graph()
         # else:
         #     self._post_one_to_graph()
 
@@ -158,9 +192,11 @@ class RequestManager:
         self.expiration_date_fd.write(self.expiration_date)
         self.expiration_date_fd.truncate()
 
-        self.existing_indicators_hash_fd.seek(0)
-        json.dump(self.existing_indicators_hash, self.existing_indicators_hash_fd, indent=2)
-        self.existing_indicators_hash_fd.truncate()
+        self.existing_indicators_uuid_fd.seek(0)
+        json.dump(
+            self.existing_indicators_uuid, self.existing_indicators_uuid_fd, indent=2
+        )
+        self.existing_indicators_uuid_fd.truncate()
 
         self._print_summary()
 
@@ -174,13 +210,13 @@ class RequestManager:
             log_file_name = file_name.replace(':', '')
             json.dump(response, open(f'{LOG_DIRECTORY_NAME}/{log_file_name}', 'w'), indent=2)
         for hash_of_indicator_to_delete in self.hash_of_indicators_to_delete.keys():
-            self.existing_indicators_hash.pop(hash_of_indicator_to_delete, None)
+            self.existing_indicators_uuid.pop(hash_of_indicator_to_delete, None)
 
     def _print_summary(self):
-        self._clear_screen()
         print('script finished running\n')
         print(f"total indicators sent:    {str(self._get_total_indicators_sent()).rjust(self.RJUST)}")
         print(f"total response success:   {str(self.success_count).rjust(self.RJUST)}")
+        print(f"total indicators updated: {str(self.update_count).rjust(self.RJUST)}")
         print(f"total response error:     {str(self.error_count).rjust(self.RJUST)}")
         print(f"total indicators deleted: {str(self.del_count).rjust(self.RJUST)}")
 
@@ -197,17 +233,35 @@ class RequestManager:
         self.indicators_to_be_sent = []
         self._log_post(response)
 
+    def _update_to_graph(self):
+        request_body = {'value': self.list_of_indicators_to_update}
+        url = (
+            GRAPH_TI_INDICATORS_URL
+            + '/updateTiIndicators'
+        )
+        response = requests.post(
+            url=url,
+            headers=self.headers,
+            json=request_body,
+        ).json()
+        self._log_update(response)
+        self.list_of_indicators_to_update = []
+
     def handle_indicator(self, indicator):
         self._update_headers_if_expired()
         indicator[EXPIRATION_DATE_TIME] = self.expiration_date
         indicator_hash = self._get_request_hash(indicator)
         indicator[INDICATOR_REQUEST_HASH] = indicator_hash
-        self.hash_of_indicators_to_delete.pop(indicator_hash, None) 
-        if indicator_hash not in self.existing_indicators_hash:
+        self.hash_of_indicators_to_delete.pop(indicator_hash, None)
+        if indicator['externalId'] not in self.indicators_to_be_updated_uuid:
             self.indicators_to_be_sent.append(indicator)
-        if len(self.indicators_to_be_sent) >= 100:
+        elif indicator['externalId'] in self.indicators_to_be_updated_uuid:
+            indicator['id'] = self.existing_indicators_uuid[indicator['externalId']]
+            self.list_of_indicators_to_update.append(indicator)
+        if len(self.indicators_to_be_sent) + len(self.list_of_indicators_to_update) >= 100:
             print(f"number of indicators sent: {self.success_count+self.error_count}")
             self._post_to_graph()
+            self._update_to_graph()
 
     def _update_headers_if_expired(self):
         if self._get_timestamp() > self.headers_expiration_time:
