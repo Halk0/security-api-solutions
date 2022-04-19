@@ -236,8 +236,7 @@ class RequestManager:
     def _update_to_graph(self):
         request_body = {'value': self.list_of_indicators_to_update}
         url = (
-            GRAPH_TI_INDICATORS_URL
-            + '/updateTiIndicators'
+            GRAPH_BULK_UPD_URL
         )
         response = requests.post(
             url=url,
