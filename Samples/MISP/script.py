@@ -1,5 +1,8 @@
+from asyncio import mixins
+from textwrap import indent
 from pymisp import PyMISP
 from pymisp import ExpandedPyMISP
+import json
 import config
 from collections import defaultdict
 import datetime
@@ -16,7 +19,7 @@ def _get_events():
         return [event['Event'] for event in misp.search(controller='events', return_format='json')]
     events_for_each_filter = [
         [event['Event'] for event in misp.search(controller='events', return_format='json', **config.misp_event_filters)]
-    ]
+        ]
     event_ids_for_each_filter = [set(event['id'] for event in events) for events in events_for_each_filter]
     event_ids_intersection = reduce((lambda x, y: x & y), event_ids_for_each_filter)
     return [event for event in events_for_each_filter[0] if event['id'] in event_ids_intersection]
@@ -40,10 +43,23 @@ def _graph_post_request_body_generator(parsed_events):
             }
             yield request_body
 
+def _convert_timestamp(timestamp):
+    return datetime.datetime.fromtimestamp(int(timestamp)).replace(microsecond=0).isoformat()
 
-def _handle_timestamp(parsed_event):
+def _handle_timestamp(parsed_event, event):
     parsed_event['lastReportedDateTime'] = str(
-        datetime.datetime.fromtimestamp(int(parsed_event['lastReportedDateTime'])))
+        _convert_timestamp(parsed_event['lastReportedDateTime'])
+    )
+    info_timestamps = [
+        f'MISP-Last-Reported-datetime;{parsed_event["lastReportedDateTime"]}',
+        f'MISP-timestamp;{_convert_timestamp(event["timestamp"])}',
+        f'MISP-publish-timestamp;{_convert_timestamp(event["publish_timestamp"])}'
+    ]
+    if event['Attribute']:
+        for attr in event['Attribute']:
+            info_timestamps.append(f'MISP-atttribute-timestamp_{event["uuid"]};{_convert_timestamp(attr["timestamp"])}')
+    parsed_event['tags'].extend(info_timestamps)
+
 
 
 def _handle_diamond_model(parsed_event):
@@ -72,11 +88,11 @@ def main():
         parsed_event = defaultdict(list)
 
         for key, mapping in EVENT_MAPPING.items():
-            parsed_event[mapping] = event.get(key, "")
+            parsed_event[mapping] = event.get(key, None)
         parsed_event['tags'] = [tag['name'].strip() for tag in event.get("Tag", [])]
         _handle_diamond_model(parsed_event)
         _handle_tlp_level(parsed_event)
-        _handle_timestamp(parsed_event)
+        _handle_timestamp(parsed_event, event)
 
         for attr in event['Attribute']:
             if attr['type'] == 'threat-actor':
@@ -88,7 +104,6 @@ def main():
 
         parsed_events.append(parsed_event)
     del events
-
     total_indicators = sum([len(v['request_objects']) for v in parsed_events])
     with RequestManager(total_indicators) as request_manager:
         for request_body in _graph_post_request_body_generator(parsed_events):
