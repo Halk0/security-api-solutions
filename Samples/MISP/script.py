@@ -51,14 +51,14 @@ def _handle_timestamp(parsed_event, event):
         _convert_timestamp(parsed_event['lastReportedDateTime'])
     )
     info_timestamps = {
-        "MISP-Last-Reported-datetime": parsed_event["lastReportedDateTime"],
-        "MISP-timestamp": _convert_timestamp(event["timestamp"]),
-        "MISP-publish-timestamp": _convert_timestamp(event["publish_timestamp"]),
-        "attribute-timestamps": []
+        "mispLastReportedDatetime": parsed_event["lastReportedDateTime"],
+        "mispTimestamp": _convert_timestamp(event["timestamp"]),
+        "mispPublishTimestamp": _convert_timestamp(event["publish_timestamp"]),
+        "mispAttributeTimestamps": []
     }
     if event['Attribute']:
         for attr in event['Attribute']:
-            info_timestamps["attribute-timestamps"].append({event['uuid']: _convert_timestamp(attr["timestamp"])})
+            info_timestamps["mispAttributeTimestamps"].append({event['uuid']: _convert_timestamp(attr["timestamp"])})
     parsed_event['additionalInformation'] = json.dumps(info_timestamps)
 
 
@@ -84,6 +84,7 @@ def main():
     config.verbose_log = ('-v' in sys.argv)
     print('fetching & parsing data from misp...')
     events = _get_events()
+    print(json.dumps(events, indent=2))
     parsed_events = list()
     for event in events:
         parsed_event = defaultdict(list)
