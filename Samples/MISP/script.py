@@ -50,15 +50,16 @@ def _handle_timestamp(parsed_event, event):
     parsed_event['lastReportedDateTime'] = str(
         _convert_timestamp(parsed_event['lastReportedDateTime'])
     )
-    info_timestamps = [
-        f'MISP-Last-Reported-datetime;{parsed_event["lastReportedDateTime"]}',
-        f'MISP-timestamp;{_convert_timestamp(event["timestamp"])}',
-        f'MISP-publish-timestamp;{_convert_timestamp(event["publish_timestamp"])}'
-    ]
+    info_timestamps = {
+        "MISP-Last-Reported-datetime": parsed_event["lastReportedDateTime"],
+        "MISP-timestamp": _convert_timestamp(event["timestamp"]),
+        "MISP-publish-timestamp": _convert_timestamp(event["publish_timestamp"]),
+        "attribute-timestamps": []
+    }
     if event['Attribute']:
         for attr in event['Attribute']:
-            info_timestamps.append(f'MISP-atttribute-timestamp_{event["uuid"]};{_convert_timestamp(attr["timestamp"])}')
-    parsed_event['tags'].extend(info_timestamps)
+            info_timestamps["attribute-timestamps"].append({event['uuid']: _convert_timestamp(attr["timestamp"])})
+    parsed_event['additionalInformation'] = json.dumps(info_timestamps)
 
 
 
